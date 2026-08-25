@@ -7,6 +7,7 @@ description = "Move all children of one directory into another"
 
 [dependencies]
 clap = { version = "4.6.6", features = ["derive"] }
+clap_complete = "4.6.9"
 libc = "0.2.177"
 renamore = { git = "https://github.com/mevanlc/renamore", rev = "10c9775a6ee8246846197965f6dc67fe00357aa3" }
 

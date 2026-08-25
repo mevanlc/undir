@@ -4,6 +4,7 @@
 
 ```console
 undir [OPTIONS] <SRCDIR> [DSTDIR]
+undir --completion <SHELL>
 ```
 
 `DSTDIR` defaults to the current directory. Successful operations are silent.
@@ -97,13 +98,18 @@ filesystem that is being adversarially modified transactional.
 
 ## error handling
 
-`--on-error stop` is the default and stops at the first mutation-time error.
-`--on-error continue` continues with independent siblings and reports every
+`--error stop` is the default and stops at the first mutation-time error.
+`--error continue` continues with independent siblings and reports every
 failure. It does not change preflight behavior, and `undir` never rolls back
 successful earlier moves.
 
 Operational and preflight failures are written to standard error and exit with
 status 1. Command-line parsing failures use Clap's status 2.
+
+## shell completion
+
+`--completion SHELL` writes a completion script to standard output and exits.
+`SHELL` is one of `bash`, `elvish`, `fish`, `pwsh`, or `zsh`.
 
 ## platforms and building
 
