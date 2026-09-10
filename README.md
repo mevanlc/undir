@@ -7,7 +7,8 @@ undir [OPTIONS] <SRCDIR> [DSTDIR]
 undir --completion <SHELL>
 ```
 
-`DSTDIR` defaults to the current directory. Successful operations are silent.
+`DSTDIR` defaults to the current directory. Successful operations are silent
+unless `--dry-run` is used.
 
 ## behavior
 
@@ -75,6 +76,24 @@ current read, traversal, insertion, replacement, and removal permissions.
 Preflight is a read-only snapshot. Permissions, mounts, sharing locks, and paths
 can change afterward, so every filesystem mutation still handles its own errors.
 
+## dry run
+
+`-n` or `--dry-run` checks the operation and prints the planned actions to standard
+output without changing the filesystem. It includes destination creation, moves,
+overwrites, and removal of emptied source directories or the source symlink.
+`--keep` omits removal of the source root. Directories moved whole appear as one
+move; merged directories list their child operations and cleanup.
+
+Actions are printed in execution order, with quoted absolute paths, only after
+checks succeed. Failures use the usual standard-error diagnostics and exit status
+1. Dry runs honor `--preflight`; even with `--preflight off`, missing `--merge` and
+`--overwrite` authorization is checked because no mutation will run to detect it.
+`--on-error` governs actual mutation errors and does not change dry-run checks.
+
+```console
+undir --dry-run --merge --overwrite source destination
+```
+
 ## rename safety
 
 By default, a move to a missing destination uses the platform's atomic
@@ -98,8 +117,8 @@ filesystem that is being adversarially modified transactional.
 
 ## error handling
 
-`--error stop` is the default and stops at the first mutation-time error.
-`--error continue` continues with independent siblings and reports every
+`--on-error stop` is the default and stops at the first mutation-time error.
+`--on-error continue` continues with independent siblings and reports every
 failure. It does not change preflight behavior, and `undir` never rolls back
 successful earlier moves.
 

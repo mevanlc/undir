@@ -2,7 +2,7 @@ use std::fs;
 use std::path::PathBuf;
 
 use tempfile::TempDir;
-use undir::{CreateMode, OnError, Options, Phase, Preflight};
+use undir::{Action, CreateMode, OnError, Options, Phase, Preflight};
 
 fn options(source: impl Into<PathBuf>, destination: impl Into<PathBuf>) -> Options {
     Options {
@@ -309,6 +309,22 @@ fn overwrite_removes_only_the_source_name_for_same_hard_link() {
     let mut opts = options(&source, &destination);
     opts.overwrite = true;
 
+    let source_root = source.canonicalize().unwrap();
+    assert_eq!(
+        undir::dry_run(&opts).unwrap(),
+        vec![
+            Action::RemoveFile {
+                path: source_root.join("same")
+            },
+            Action::RemoveDirectory { path: source_root },
+        ]
+    );
+    assert_eq!(fs::read_to_string(source.join("same")).unwrap(), "contents");
+    assert_eq!(
+        fs::read_to_string(destination.join("same")).unwrap(),
+        "contents"
+    );
+
     undir::run(&opts).unwrap();
 
     assert!(!source.exists());
@@ -326,6 +342,20 @@ fn nested_symlinks_are_moved_without_following_them() {
     fs::create_dir(&external).unwrap();
     fs::write(external.join("untouched"), "contents").unwrap();
     std::os::unix::fs::symlink(&external, source.join("link")).unwrap();
+
+    let source_root = source.canonicalize().unwrap();
+    assert_eq!(
+        undir::dry_run(&options(&source, &destination)).unwrap(),
+        vec![
+            Action::Move {
+                source: source_root.join("link"),
+                destination: destination.canonicalize().unwrap().join("link"),
+            },
+            Action::RemoveDirectory { path: source_root },
+        ]
+    );
+    assert_eq!(fs::read_link(source.join("link")).unwrap(), external);
+    assert!(!destination.join("link").exists());
 
     undir::run(&options(&source, &destination)).unwrap();
 
@@ -352,6 +382,22 @@ fn source_root_symlink_is_removed_but_its_empty_target_remains() {
     fs::create_dir(&destination).unwrap();
     fs::write(target.join("file"), "contents").unwrap();
     std::os::unix::fs::symlink(&target, &source_link).unwrap();
+
+    assert_eq!(
+        undir::dry_run(&options(&source_link, &destination)).unwrap(),
+        vec![
+            Action::Move {
+                source: target.canonicalize().unwrap().join("file"),
+                destination: destination.canonicalize().unwrap().join("file"),
+            },
+            Action::RemoveFile {
+                path: source_link.clone()
+            },
+        ]
+    );
+    assert_eq!(fs::read_link(&source_link).unwrap(), target);
+    assert_eq!(fs::read_to_string(target.join("file")).unwrap(), "contents");
+    assert!(fs::read_dir(&destination).unwrap().next().is_none());
 
     undir::run(&options(&source_link, &destination)).unwrap();
 
@@ -409,9 +455,11 @@ fn permission_preflight_does_not_mutate() {
     fs::set_permissions(&destination, fs::Permissions::from_mode(0o500)).unwrap();
 
     let result = undir::run(&options(&source, &destination));
+    let preview_result = undir::dry_run(&options(&source, &destination));
     fs::set_permissions(&destination, original_permissions).unwrap();
 
     let report = result.unwrap_err();
+    assert_eq!(preview_result.unwrap_err(), report);
     assert_eq!(report.issues()[0].phase(), Phase::Preflight);
     assert!(source.join("file").exists());
     assert!(!destination.join("file").exists());
@@ -426,6 +474,10 @@ fn strict_move_succeeds_when_the_host_filesystem_supports_it() {
     fs::write(source.join("file"), "contents").unwrap();
     let mut opts = options(&source, &destination);
     opts.strict = true;
+
+    assert_eq!(undir::dry_run(&opts).unwrap().len(), 2);
+    assert!(source.join("file").exists());
+    assert!(!destination.join("file").exists());
 
     undir::run(&opts).unwrap();
 

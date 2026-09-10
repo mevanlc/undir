@@ -7,7 +7,55 @@ use std::path::{Path, PathBuf};
 
 use clap::ValueEnum;
 
-pub use engine::run;
+pub use engine::{dry_run, run};
+
+/// A filesystem operation planned by a successful dry run.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum Action {
+    CreateDirectory {
+        path: PathBuf,
+        parents: bool,
+    },
+    Move {
+        source: PathBuf,
+        destination: PathBuf,
+    },
+    Replace {
+        source: PathBuf,
+        destination: PathBuf,
+    },
+    RemoveFile {
+        path: PathBuf,
+    },
+    RemoveDirectory {
+        path: PathBuf,
+    },
+}
+
+impl fmt::Display for Action {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::CreateDirectory { path, parents } => {
+                let operation = if *parents { "mkdirs" } else { "mkdir" };
+                write!(formatter, "{operation} {path:?}")
+            }
+            Self::Move {
+                source,
+                destination,
+            } => {
+                write!(formatter, "move {source:?} -> {destination:?}")
+            }
+            Self::Replace {
+                source,
+                destination,
+            } => {
+                write!(formatter, "overwrite {source:?} -> {destination:?}")
+            }
+            Self::RemoveFile { path } => write!(formatter, "remove {path:?}"),
+            Self::RemoveDirectory { path } => write!(formatter, "rmdir {path:?}"),
+        }
+    }
+}
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, ValueEnum)]
 pub enum OnError {

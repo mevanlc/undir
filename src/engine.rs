@@ -7,7 +7,7 @@ use crate::pathing::{
     absolute_lexical, is_same_or_child, nearest_existing, resolve_existing_prefix, sorted_children,
 };
 use crate::platform;
-use crate::{CreateMode, Issue, OnError, Options, Phase, Preflight, Report};
+use crate::{Action, CreateMode, Issue, OnError, Options, Phase, Preflight, Report};
 
 struct Prepared {
     source_input: PathBuf,
@@ -258,10 +258,7 @@ fn path_is_within(path: &Path, root: &Path) -> io::Result<bool> {
 
 pub fn run(options: &Options) -> Result<(), Report> {
     let mut prepared = Prepared::new(options)?;
-    let issues = Checker::new(options, &prepared).run();
-    if !issues.is_empty() {
-        return Err(Report::from_issues(issues));
-    }
+    Checker::new(options, &prepared, false).run()?;
 
     prepared
         .create_destination(options)
@@ -276,26 +273,35 @@ pub fn run(options: &Options) -> Result<(), Report> {
     }
 }
 
+/// Check and list operations in execution order without changing the filesystem.
+/// Collision authorization is checked even when permission preflight is off.
+pub fn dry_run(options: &Options) -> Result<Vec<Action>, Report> {
+    let prepared = Prepared::new(options)?;
+    Checker::new(options, &prepared, true).run()
+}
+
 struct Checker<'a> {
     options: &'a Options,
     prepared: &'a Prepared,
     issues: Vec<Issue>,
     mounts: HashMap<PathBuf, Result<platform::MountId, String>>,
     strict_support: HashMap<platform::MountId, bool>,
+    actions: Option<Vec<Action>>,
 }
 
 impl<'a> Checker<'a> {
-    fn new(options: &'a Options, prepared: &'a Prepared) -> Self {
+    fn new(options: &'a Options, prepared: &'a Prepared, dry_run: bool) -> Self {
         Self {
             options,
             prepared,
             issues: Vec::new(),
             mounts: HashMap::new(),
             strict_support: HashMap::new(),
+            actions: dry_run.then(Vec::new),
         }
     }
 
-    fn run(mut self) -> Vec<Issue> {
+    fn run(mut self) -> Result<Vec<Action>, Report> {
         if self.check_permissions() {
             self.permission_check(
                 &self.prepared.source_root,
@@ -324,6 +330,14 @@ impl<'a> Checker<'a> {
         if !self.should_stop() {
             self.check_root_cleanup();
         }
+        if !self.prepared.destination_exists
+            && let Some(actions) = &mut self.actions
+        {
+            actions.push(Action::CreateDirectory {
+                path: self.prepared.destination_input.clone(),
+                parents: self.options.create == CreateMode::Parents,
+            });
+        }
         if !self.should_stop() {
             match sorted_children(&self.prepared.source_root) {
                 Ok(children) => {
@@ -347,7 +361,23 @@ impl<'a> Checker<'a> {
                 )),
             }
         }
-        self.issues
+        if !self.issues.is_empty() {
+            return Err(Report::from_issues(self.issues));
+        }
+        if !self.options.keep
+            && let Some(actions) = &mut self.actions
+        {
+            actions.push(if self.prepared.source_is_symlink {
+                Action::RemoveFile {
+                    path: self.prepared.source_input.clone(),
+                }
+            } else {
+                Action::RemoveDirectory {
+                    path: self.prepared.source_root.clone(),
+                }
+            });
+        }
+        Ok(self.actions.unwrap_or_default())
     }
 
     fn check_root_cleanup(&mut self) {
@@ -517,6 +547,11 @@ impl<'a> Checker<'a> {
                 error,
             )),
         }
+        if let Some(actions) = &mut self.actions {
+            actions.push(Action::RemoveDirectory {
+                path: source.to_path_buf(),
+            });
+        }
     }
 
     fn check_rename(
@@ -619,6 +654,36 @@ impl<'a> Checker<'a> {
                 |path| platform::check_destination_parent(path, source_is_dir),
             );
         }
+        if self.issues.is_empty() && self.actions.is_some() {
+            let action = if destination_missing {
+                Action::Move {
+                    source: source.to_path_buf(),
+                    destination: destination.to_path_buf(),
+                }
+            } else {
+                match platform::same_file(source, destination) {
+                    Ok(true) => Action::RemoveFile {
+                        path: source.to_path_buf(),
+                    },
+                    Ok(false) => Action::Replace {
+                        source: source.to_path_buf(),
+                        destination: destination.to_path_buf(),
+                    },
+                    Err(error) => {
+                        self.push(io_issue(
+                            source,
+                            destination,
+                            "cannot compare entries",
+                            error,
+                        ));
+                        return;
+                    }
+                }
+            };
+            if let Some(actions) = &mut self.actions {
+                actions.push(action);
+            }
+        }
     }
 
     fn check_mount_point_if_directory(&mut self, source: &Path, source_is_dir: bool) {
@@ -700,7 +765,7 @@ impl<'a> Checker<'a> {
     }
 
     fn check_authorization(&self) -> bool {
-        self.options.preflight != Preflight::Off
+        self.options.preflight != Preflight::Off || self.actions.is_some()
     }
 }
 

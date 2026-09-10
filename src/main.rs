@@ -51,7 +51,11 @@ struct Cli {
 
     /// What to do after a mutation-time filesystem error.
     #[arg(long, value_enum, default_value_t)]
-    error: OnError,
+    on_error: OnError,
+
+    /// Show planned operations without changing the filesystem.
+    #[arg(short = 'n', long)]
+    dry_run: bool,
 
     /// Keep srcdir after all of its children have been moved.
     #[arg(long)]
@@ -98,22 +102,43 @@ fn main() -> ExitCode {
         dstdir: cli.dstdir,
         merge: cli.merge,
         overwrite: cli.overwrite,
-        on_error: cli.error,
+        on_error: cli.on_error,
         keep: cli.keep,
         preflight: cli.preflight,
         create,
         strict: cli.strict,
     };
 
+    if cli.dry_run {
+        return match undir::dry_run(&options) {
+            Ok(actions) => {
+                let mut stdout = io::stdout().lock();
+                for action in actions {
+                    if let Err(error) = writeln!(stdout, "{action}") {
+                        if error.kind() == io::ErrorKind::BrokenPipe {
+                            return ExitCode::SUCCESS;
+                        }
+                        eprintln!("undir: failed to write dry-run output: {error}");
+                        return ExitCode::FAILURE;
+                    }
+                }
+                ExitCode::SUCCESS
+            }
+            Err(report) => write_report(&report),
+        };
+    }
+
     match undir::run(&options) {
         Ok(()) => ExitCode::SUCCESS,
-        Err(report) => {
-            for issue in report.issues() {
-                eprintln!("undir: {issue}");
-            }
-            ExitCode::FAILURE
-        }
+        Err(report) => write_report(&report),
     }
+}
+
+fn write_report(report: &undir::Report) -> ExitCode {
+    for issue in report.issues() {
+        eprintln!("undir: {issue}");
+    }
+    ExitCode::FAILURE
 }
 
 fn write_completion(shell: CompletionShell) -> ExitCode {
