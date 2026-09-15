@@ -120,6 +120,14 @@ mod imp {
         check_access(path, libc::R_OK | libc::X_OK)
     }
 
+    pub fn check_file_read(path: &Path) -> io::Result<()> {
+        check_access(path, libc::R_OK)
+    }
+
+    pub fn copy_symlink(source: &Path, destination: &Path) -> io::Result<()> {
+        std::os::unix::fs::symlink(std::fs::read_link(source)?, destination)
+    }
+
     pub fn check_destination_parent(path: &Path, _entry_is_dir: bool) -> io::Result<()> {
         check_access(path, libc::W_OK | libc::X_OK)
     }
@@ -169,8 +177,8 @@ mod imp {
     use windows_sys::Win32::Storage::FileSystem::{
         BY_HANDLE_FILE_INFORMATION, CreateFileW, DELETE, FILE_ADD_FILE, FILE_ADD_SUBDIRECTORY,
         FILE_DELETE_CHILD, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
-        FILE_LIST_DIRECTORY, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ,
-        FILE_SHARE_WRITE, FILE_TRAVERSE, GetFileInformationByHandle,
+        FILE_LIST_DIRECTORY, FILE_READ_ATTRIBUTES, FILE_READ_DATA, FILE_SHARE_DELETE,
+        FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_TRAVERSE, GetFileInformationByHandle,
         GetVolumeNameForVolumeMountPointW, GetVolumePathNameW, MOVEFILE_REPLACE_EXISTING,
         MoveFileExW, OPEN_EXISTING,
     };
@@ -296,6 +304,24 @@ mod imp {
         open_for_access(path, FILE_LIST_DIRECTORY | FILE_TRAVERSE, false)
     }
 
+    pub fn check_file_read(path: &Path) -> io::Result<()> {
+        open_for_access(path, FILE_READ_DATA, false)
+    }
+
+    pub fn copy_symlink(source: &Path, destination: &Path) -> io::Result<()> {
+        use std::os::windows::fs::{FileTypeExt, symlink_dir, symlink_file};
+
+        let target = std::fs::read_link(source)?;
+        if std::fs::symlink_metadata(source)?
+            .file_type()
+            .is_symlink_dir()
+        {
+            symlink_dir(target, destination)
+        } else {
+            symlink_file(target, destination)
+        }
+    }
+
     pub fn check_destination_parent(path: &Path, entry_is_dir: bool) -> io::Result<()> {
         open_for_access(
             path,
@@ -346,6 +372,14 @@ pub(crate) fn mount_id(path: &Path) -> io::Result<MountId> {
 
 pub(crate) fn check_directory_read(path: &Path) -> io::Result<()> {
     imp::check_directory_read(path)
+}
+
+pub(crate) fn check_file_read(path: &Path) -> io::Result<()> {
+    imp::check_file_read(path)
+}
+
+pub(crate) fn copy_symlink(source: &Path, destination: &Path) -> io::Result<()> {
+    imp::copy_symlink(source, destination)
 }
 
 pub(crate) fn check_destination_parent(path: &Path, entry_is_dir: bool) -> io::Result<()> {

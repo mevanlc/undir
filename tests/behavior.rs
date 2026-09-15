@@ -12,6 +12,7 @@ fn options(source: impl Into<PathBuf>, destination: impl Into<PathBuf>) -> Optio
         overwrite: false,
         on_error: OnError::Stop,
         keep: false,
+        keep_empty: false,
         preflight: Preflight::Fast,
         create: CreateMode::Existing,
         strict: false,
@@ -53,16 +54,28 @@ fn moves_every_child_and_removes_source() {
 }
 
 #[test]
-fn keep_preserves_an_empty_source() {
+fn keep_empty_preserves_an_empty_source() {
     let (_temporary, source, destination) = roots();
     fs::write(source.join("file"), "contents").unwrap();
+    fs::create_dir_all(source.join("shared/nested")).unwrap();
+    fs::create_dir(destination.join("shared")).unwrap();
+    fs::write(source.join("shared/nested/child"), "child").unwrap();
     let mut opts = options(&source, &destination);
-    opts.keep = true;
+    opts.keep_empty = true;
+    opts.merge = true;
 
     undir::run(&opts).unwrap();
 
     assert!(source.is_dir());
     assert!(fs::read_dir(&source).unwrap().next().is_none());
+    assert_eq!(
+        fs::read_to_string(destination.join("file")).unwrap(),
+        "contents"
+    );
+    assert_eq!(
+        fs::read_to_string(destination.join("shared/nested/child")).unwrap(),
+        "child"
+    );
 }
 
 #[test]
@@ -258,7 +271,7 @@ fn mkdirs_creates_parents_and_accepts_an_existing_directory() {
     fs::write(source.join("first"), "first").unwrap();
     let mut opts = options(&source, &destination);
     opts.create = CreateMode::Parents;
-    opts.keep = true;
+    opts.keep_empty = true;
 
     undir::run(&opts).unwrap();
     fs::write(source.join("second"), "second").unwrap();

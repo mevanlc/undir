@@ -25,6 +25,9 @@ impl Prepared {
     }
 
     fn try_new(options: &Options) -> Result<Self, Issue> {
+        if options.keep && options.keep_empty {
+            return Err(Issue::setup("--keep cannot be used with --keep-empty"));
+        }
         let source_input = absolute_lexical(&options.srcdir)
             .map_err(|error| Issue::setup(format!("cannot resolve srcdir: {error}")))?;
         let source_link_metadata = fs::symlink_metadata(&source_input).map_err(|error| {
@@ -44,7 +47,7 @@ impl Prepared {
         })?;
         let source_alias = resolve_final_entry(&source_input)
             .map_err(|error| Issue::setup(format!("cannot resolve srcdir parent: {error}")))?;
-        if source_is_symlink {
+        if source_is_symlink && !options.keep {
             let source_alias_parent = source_alias.parent().ok_or_else(|| {
                 Issue::setup(format!(
                     "srcdir symlink {source_input:?} has no parent directory"
@@ -365,6 +368,7 @@ impl<'a> Checker<'a> {
             return Err(Report::from_issues(self.issues));
         }
         if !self.options.keep
+            && !self.options.keep_empty
             && let Some(actions) = &mut self.actions
         {
             actions.push(if self.prepared.source_is_symlink {
@@ -381,7 +385,7 @@ impl<'a> Checker<'a> {
     }
 
     fn check_root_cleanup(&mut self) {
-        if self.options.keep {
+        if self.options.keep || self.options.keep_empty {
             return;
         }
         let cleanup_path = if self.prepared.source_is_symlink {
@@ -451,7 +455,7 @@ impl<'a> Checker<'a> {
         };
 
         match destination_metadata {
-            None => self.check_rename(source, destination, &source_metadata, true),
+            None => self.check_transfer(source, destination, &source_metadata, true),
             Some(destination_metadata) => {
                 let source_is_dir = is_directory(&source_metadata);
                 let destination_is_dir = is_directory(&destination_metadata);
@@ -467,7 +471,7 @@ impl<'a> Checker<'a> {
                             ));
                         }
                         if !self.should_stop() {
-                            self.check_rename(source, destination, &source_metadata, false);
+                            self.check_transfer(source, destination, &source_metadata, false);
                         }
                         if self.check_permissions() && !self.should_stop() {
                             self.permission_check(
@@ -507,7 +511,9 @@ impl<'a> Checker<'a> {
         if self.should_stop() {
             return;
         }
-        self.check_mount_point(source);
+        if !self.options.keep {
+            self.check_mount_point(source);
+        }
         if self.check_permissions() && !self.should_stop() {
             self.permission_check(
                 source,
@@ -515,17 +521,30 @@ impl<'a> Checker<'a> {
                 "cannot enumerate source directory",
                 platform::check_directory_read,
             );
-            self.permission_check(
-                source,
-                Some(destination),
-                "cannot remove merged source directory",
-                platform::check_remove,
-            );
+            if !self.options.keep {
+                self.permission_check(
+                    source,
+                    Some(destination),
+                    "cannot remove merged source directory",
+                    platform::check_remove,
+                );
+            }
         }
         if self.should_stop() {
             return;
         }
 
+        self.check_children(source, destination);
+        if !self.options.keep
+            && let Some(actions) = &mut self.actions
+        {
+            actions.push(Action::RemoveDirectory {
+                path: source.to_path_buf(),
+            });
+        }
+    }
+
+    fn check_children(&mut self, source: &Path, destination: &Path) {
         match sorted_children(source) {
             Ok(children) => {
                 for child in children {
@@ -547,10 +566,107 @@ impl<'a> Checker<'a> {
                 error,
             )),
         }
+    }
+
+    fn check_transfer(
+        &mut self,
+        source: &Path,
+        destination: &Path,
+        source_metadata: &Metadata,
+        destination_missing: bool,
+    ) {
+        if self.options.keep {
+            self.check_copy(source, destination, source_metadata, destination_missing);
+        } else {
+            self.check_rename(source, destination, source_metadata, destination_missing);
+        }
+    }
+
+    fn check_copy(
+        &mut self,
+        source: &Path,
+        destination: &Path,
+        metadata: &Metadata,
+        destination_missing: bool,
+    ) {
+        if let Err(error) = require_copyable(metadata) {
+            self.push(io_issue(source, destination, "cannot copy entry", error));
+            return;
+        }
+        let source_is_dir = is_directory(metadata);
+        let parent = match nearest_existing(destination.parent().expect("a child has a parent")) {
+            Ok(parent) => parent,
+            Err(error) => {
+                self.push(io_issue(
+                    source,
+                    destination,
+                    "cannot inspect destination parent",
+                    error,
+                ));
+                return;
+            }
+        };
+        if self.options.strict && destination_missing && !source_is_dir {
+            self.check_strict_support(source, destination, &parent);
+        }
+        if self.check_permissions() && !self.should_stop() {
+            if source_is_dir {
+                self.permission_check(
+                    source,
+                    Some(destination),
+                    "cannot enumerate source directory",
+                    platform::check_directory_read,
+                );
+            } else if metadata.is_file() {
+                self.permission_check(
+                    source,
+                    Some(destination),
+                    "cannot read source file",
+                    platform::check_file_read,
+                );
+            } else if let Err(error) = fs::read_link(source) {
+                self.push(io_issue(
+                    source,
+                    destination,
+                    "cannot read source symlink",
+                    error,
+                ));
+            }
+            // Nondirectory copies are staged in a temporary destination directory.
+            self.permission_check(
+                &parent,
+                Some(destination),
+                "cannot create destination directory",
+                |path| platform::check_destination_parent(path, true),
+            );
+            if !source_is_dir {
+                self.permission_check(
+                    &parent,
+                    Some(destination),
+                    "cannot add destination entry",
+                    |path| platform::check_destination_parent(path, false),
+                );
+            }
+        }
+        if self.should_stop() {
+            return;
+        }
         if let Some(actions) = &mut self.actions {
-            actions.push(Action::RemoveDirectory {
-                path: source.to_path_buf(),
+            actions.push(if source_is_dir {
+                Action::CreateDirectory {
+                    path: destination.to_path_buf(),
+                    parents: false,
+                }
+            } else {
+                Action::Copy {
+                    source: source.to_path_buf(),
+                    destination: destination.to_path_buf(),
+                    overwrite: !destination_missing,
+                }
             });
+        }
+        if source_is_dir {
+            self.check_children(source, destination);
         }
     }
 
@@ -614,31 +730,7 @@ impl<'a> Checker<'a> {
         }
 
         if self.options.strict && destination_missing {
-            let cached = destination_mount
-                .as_ref()
-                .ok()
-                .and_then(|mount| self.strict_support.get(mount).copied());
-            let support = cached
-                .map(Ok)
-                .unwrap_or_else(|| renamore::rename_exclusive_is_atomic(&destination_mount_path));
-            if let (Ok(mount), Ok(supported)) = (&destination_mount, &support) {
-                self.strict_support.insert(mount.clone(), *supported);
-            }
-            match support {
-                Ok(true) => {}
-                Ok(false) => self.push(Issue::at(
-                    Phase::Preflight,
-                    Some(source),
-                    Some(destination),
-                    "--strict requires atomic no-clobber rename support on the destination filesystem",
-                )),
-                Err(error) => self.push(io_issue(
-                    source,
-                    destination,
-                    "cannot determine atomic no-clobber rename support",
-                    error,
-                )),
-            }
+            self.check_strict_support(source, destination, &destination_mount_path);
         }
         if self.check_permissions() && !self.should_stop() {
             self.permission_check(
@@ -683,6 +775,40 @@ impl<'a> Checker<'a> {
             if let Some(actions) = &mut self.actions {
                 actions.push(action);
             }
+        }
+    }
+
+    fn check_strict_support(
+        &mut self,
+        source: &Path,
+        destination: &Path,
+        destination_mount_path: &Path,
+    ) {
+        let destination_mount = self.cached_mount_id(destination_mount_path);
+        let cached = destination_mount
+            .as_ref()
+            .ok()
+            .and_then(|mount| self.strict_support.get(mount).copied());
+        let support = cached
+            .map(Ok)
+            .unwrap_or_else(|| renamore::rename_exclusive_is_atomic(destination_mount_path));
+        if let (Ok(mount), Ok(supported)) = (&destination_mount, &support) {
+            self.strict_support.insert(mount.clone(), *supported);
+        }
+        match support {
+            Ok(true) => {}
+            Ok(false) => self.push(Issue::at(
+                Phase::Preflight,
+                Some(source),
+                Some(destination),
+                "--strict requires atomic no-clobber rename support on the destination filesystem",
+            )),
+            Err(error) => self.push(io_issue(
+                source,
+                destination,
+                "cannot determine atomic no-clobber rename support",
+                error,
+            )),
         }
     }
 
@@ -790,6 +916,17 @@ fn is_directory(metadata: &Metadata) -> bool {
     metadata.file_type().is_dir()
 }
 
+fn require_copyable(metadata: &Metadata) -> io::Result<()> {
+    if metadata.is_file() || metadata.is_dir() || metadata.file_type().is_symlink() {
+        Ok(())
+    } else {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "--keep supports regular files, directories, and symlinks only",
+        ))
+    }
+}
+
 fn targets_source_alias(destination: &Path, source_alias: &Path) -> io::Result<bool> {
     if destination == source_alias {
         return Ok(true);
@@ -838,18 +975,18 @@ impl<'a> Mutator<'a> {
                     .file_name()
                     .expect("a directory child always has a file name"),
             );
-            self.move_entry(&source, &destination, true);
+            self.transfer_entry(&source, &destination, true);
             if self.stopped {
                 return;
             }
         }
 
-        if !self.options.keep {
+        if !self.options.keep && !self.options.keep_empty {
             self.remove_source_root();
         }
     }
 
-    fn move_entry(&mut self, source: &Path, destination: &Path, allow_retry: bool) {
+    fn transfer_entry(&mut self, source: &Path, destination: &Path, allow_retry: bool) {
         match targets_source_alias(destination, &self.prepared.source_alias) {
             Ok(true) => {
                 self.record(Issue::at(
@@ -897,7 +1034,39 @@ impl<'a> Mutator<'a> {
         };
 
         match destination_metadata {
-            None => match self.rename_missing(source, destination) {
+            None if self.options.keep && is_directory(&source_metadata) => {
+                match fs::create_dir(destination) {
+                    Ok(()) => {
+                        self.transfer_children(source, destination);
+                        // Apply permissions after copying children so a read-only source
+                        // directory does not prevent populating its new copy.
+                        if let Err(error) =
+                            fs::set_permissions(destination, source_metadata.permissions())
+                        {
+                            self.record(mutation_io_issue(
+                                source,
+                                destination,
+                                "cannot set copied directory permissions",
+                                error,
+                            ));
+                        }
+                    }
+                    Err(error) if allow_retry && error.kind() == io::ErrorKind::AlreadyExists => {
+                        self.transfer_entry(source, destination, false);
+                    }
+                    Err(error) => self.record(mutation_io_issue(
+                        source,
+                        destination,
+                        "cannot create copied directory",
+                        error,
+                    )),
+                }
+            }
+            None => match if self.options.keep {
+                self.copy_nondirectory(source, destination, false)
+            } else {
+                self.rename_missing(source, destination)
+            } {
                 Ok(()) => {}
                 Err(error)
                     if allow_retry
@@ -906,12 +1075,16 @@ impl<'a> Mutator<'a> {
                             io::ErrorKind::AlreadyExists | io::ErrorKind::NotFound
                         ) =>
                 {
-                    self.move_entry(source, destination, false);
+                    self.transfer_entry(source, destination, false);
                 }
                 Err(error) => self.record(mutation_io_issue(
                     source,
                     destination,
-                    "cannot move entry",
+                    if self.options.keep {
+                        "cannot copy entry"
+                    } else {
+                        "cannot move entry"
+                    },
                     error,
                 )),
             },
@@ -947,6 +1120,39 @@ impl<'a> Mutator<'a> {
         }
     }
 
+    fn copy_nondirectory(
+        &self,
+        source: &Path,
+        destination: &Path,
+        overwrite: bool,
+    ) -> io::Result<()> {
+        let metadata = fs::symlink_metadata(source)?;
+        require_copyable(&metadata)?;
+        if is_directory(&metadata) {
+            return Err(io::Error::other("source is no longer a nondirectory"));
+        }
+        // Publish a completed copy with the same rename guarantees as a move.
+        // Never open the destination for writing: it may alias the source or
+        // be a symlink to an unrelated file.
+        let staging = tempfile::Builder::new().prefix(".undir-").tempdir_in(
+            destination
+                .parent()
+                .expect("a destination child has a parent"),
+        )?;
+        let staged = staging.path().join("entry");
+        if metadata.file_type().is_symlink() {
+            platform::copy_symlink(source, &staged)?;
+        } else {
+            fs::copy(source, &staged)?;
+        }
+        if overwrite {
+            platform::rename_replace(&staged, destination)?;
+        } else {
+            self.rename_missing(&staged, destination)?;
+        }
+        staging.close()
+    }
+
     fn merge_directory(&mut self, source: &Path, destination: &Path) {
         if !self.options.merge {
             self.record(Issue::at(
@@ -959,28 +1165,8 @@ impl<'a> Mutator<'a> {
         }
 
         let issue_count = self.issues.len();
-        let children = match sorted_children(source) {
-            Ok(children) => children,
-            Err(error) => {
-                self.record(mutation_io_issue(
-                    source,
-                    destination,
-                    "cannot enumerate source directory",
-                    error,
-                ));
-                return;
-            }
-        };
-        for child in children {
-            let child_destination = destination.join(
-                child
-                    .file_name()
-                    .expect("a directory child always has a file name"),
-            );
-            self.move_entry(&child, &child_destination, true);
-            if self.stopped {
-                return;
-            }
+        if !self.transfer_children(source, destination) || self.options.keep {
+            return;
         }
 
         match directory_is_empty(source) {
@@ -1010,6 +1196,33 @@ impl<'a> Mutator<'a> {
         }
     }
 
+    fn transfer_children(&mut self, source: &Path, destination: &Path) -> bool {
+        let children = match sorted_children(source) {
+            Ok(children) => children,
+            Err(error) => {
+                self.record(mutation_io_issue(
+                    source,
+                    destination,
+                    "cannot enumerate source directory",
+                    error,
+                ));
+                return false;
+            }
+        };
+        for child in children {
+            let child_destination = destination.join(
+                child
+                    .file_name()
+                    .expect("a directory child always has a file name"),
+            );
+            self.transfer_entry(&child, &child_destination, true);
+            if self.stopped {
+                return false;
+            }
+        }
+        true
+    }
+
     fn replace_nondirectory(&mut self, source: &Path, destination: &Path) {
         if !self.options.overwrite {
             self.record(Issue::at(
@@ -1021,10 +1234,14 @@ impl<'a> Mutator<'a> {
             return;
         }
 
-        let result = match platform::same_file(source, destination) {
-            Ok(true) => fs::remove_file(source),
-            Ok(false) => platform::rename_replace(source, destination),
-            Err(error) => Err(error),
+        let result = if self.options.keep {
+            self.copy_nondirectory(source, destination, true)
+        } else {
+            match platform::same_file(source, destination) {
+                Ok(true) => fs::remove_file(source),
+                Ok(false) => platform::rename_replace(source, destination),
+                Err(error) => Err(error),
+            }
         };
         if let Err(error) = result {
             self.record(mutation_io_issue(

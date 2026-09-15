@@ -71,6 +71,8 @@ fn help_lists_cli_options() {
     );
     assert!(stdout.contains("--on-error <ON_ERROR>"));
     assert!(stdout.contains("-n, --dry-run"));
+    assert!(stdout.contains("--keep"));
+    assert!(stdout.contains("--keep-empty"));
     assert!(stdout.contains("--completion <SHELL>"));
     assert!(stdout.contains("[possible values: bash, elvish, fish, pwsh, zsh]"));
 }
@@ -100,8 +102,93 @@ fn completion_generates_scripts_for_supported_shells() {
         assert!(stdout.contains("undir"));
         assert!(stdout.contains("on-error"));
         assert!(stdout.contains("dry-run"));
+        assert!(stdout.contains("keep-empty"));
         assert!(output.stderr.is_empty());
     }
+}
+
+#[test]
+fn keep_and_keep_empty_select_copy_or_move() {
+    for flag in ["--keep", "--keep-empty"] {
+        let temporary = tempfile::tempdir().unwrap();
+        let source = temporary.path().join("source");
+        let destination = temporary.path().join("destination");
+        fs::create_dir(&source).unwrap();
+        fs::create_dir(&destination).unwrap();
+        fs::write(source.join("file"), "contents").unwrap();
+        let output = Command::new(env!("CARGO_BIN_EXE_undir"))
+            .arg(flag)
+            .arg(&source)
+            .arg(&destination)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(output.stdout.is_empty());
+        assert!(source.is_dir());
+        assert_eq!(source.join("file").exists(), flag == "--keep");
+        assert_eq!(
+            fs::read_to_string(destination.join("file")).unwrap(),
+            "contents"
+        );
+    }
+}
+
+#[test]
+fn keep_and_keep_empty_conflict() {
+    let output = Command::new(env!("CARGO_BIN_EXE_undir"))
+        .args(["--keep", "--keep-empty", "source"])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("cannot be used with"));
+}
+
+#[test]
+fn dry_run_keep_displays_copies_and_overwrites() {
+    let temporary = tempfile::tempdir().unwrap();
+    let root = temporary.path().canonicalize().unwrap();
+    let source = root.join("source");
+    let destination = root.join("destination");
+    fs::create_dir(&source).unwrap();
+    fs::create_dir(&destination).unwrap();
+    fs::write(source.join("new"), "new").unwrap();
+    fs::write(source.join("replaced"), "source").unwrap();
+    fs::write(destination.join("replaced"), "destination").unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_undir"))
+        .args(["--dry-run", "--keep", "--overwrite"])
+        .arg(&source)
+        .arg(&destination)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap(),
+        format!(
+            "copy {:?} -> {:?}\ncopy --overwrite {:?} -> {:?}\n",
+            source.join("new"),
+            destination.join("new"),
+            source.join("replaced"),
+            destination.join("replaced"),
+        )
+    );
+    assert_eq!(
+        fs::read_to_string(source.join("replaced")).unwrap(),
+        "source"
+    );
+    assert_eq!(
+        fs::read_to_string(destination.join("replaced")).unwrap(),
+        "destination"
+    );
+    assert!(!destination.join("new").exists());
 }
 
 #[test]
@@ -185,7 +272,7 @@ fn dry_run_flags_preview_moves_without_changing_files() {
 }
 
 #[test]
-fn dry_run_previews_recursive_merge_overwrite_and_keep() {
+fn dry_run_previews_recursive_merge_overwrite_and_keep_empty() {
     let temporary = tempfile::tempdir().unwrap();
     let root = temporary.path().canonicalize().unwrap();
     let source = root.join("source");
@@ -197,7 +284,7 @@ fn dry_run_previews_recursive_merge_overwrite_and_keep() {
     fs::write(source.join("shared/new"), "new").unwrap();
 
     let output = Command::new(env!("CARGO_BIN_EXE_undir"))
-        .args(["-n", "--merge", "--overwrite", "--keep"])
+        .args(["-n", "--merge", "--overwrite", "--keep-empty"])
         .arg(&source)
         .arg(&destination)
         .output()

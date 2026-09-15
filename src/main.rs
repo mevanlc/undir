@@ -33,11 +33,11 @@ impl From<CompletionShell> for clap_complete::Shell {
     override_usage = "undir [OPTIONS] <SRCDIR> [DSTDIR]\n       undir --completion <SHELL>"
 )]
 struct Cli {
-    /// Directory whose children will be moved.
+    /// Directory whose children will be moved (or copied with --keep).
     #[arg(required_unless_present = "completion")]
     srcdir: Option<PathBuf>,
 
-    /// Directory into which the children will be moved.
+    /// Directory into which the children will be moved or copied.
     #[arg(default_value = ".")]
     dstdir: PathBuf,
 
@@ -57,9 +57,13 @@ struct Cli {
     #[arg(short = 'n', long)]
     dry_run: bool,
 
-    /// Keep srcdir after all of its children have been moved.
-    #[arg(long)]
+    /// Copy instead of moving, preserving srcdir and all of its contents.
+    #[arg(long, conflicts_with = "keep_empty")]
     keep: bool,
+
+    /// Keep the empty srcdir after moving its children.
+    #[arg(long)]
+    keep_empty: bool,
 
     /// How thoroughly to check the operation before mutation.
     #[arg(long, value_enum, default_value_t)]
@@ -104,6 +108,7 @@ fn main() -> ExitCode {
         overwrite: cli.overwrite,
         on_error: cli.on_error,
         keep: cli.keep,
+        keep_empty: cli.keep_empty,
         preflight: cli.preflight,
         create,
         strict: cli.strict,

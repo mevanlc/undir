@@ -20,6 +20,11 @@ pub enum Action {
         source: PathBuf,
         destination: PathBuf,
     },
+    Copy {
+        source: PathBuf,
+        destination: PathBuf,
+        overwrite: bool,
+    },
     Replace {
         source: PathBuf,
         destination: PathBuf,
@@ -50,6 +55,18 @@ impl fmt::Display for Action {
                 destination,
             } => {
                 write!(formatter, "overwrite {source:?} -> {destination:?}")
+            }
+            Self::Copy {
+                source,
+                destination,
+                overwrite,
+            } => {
+                let operation = if *overwrite {
+                    "copy --overwrite"
+                } else {
+                    "copy"
+                };
+                write!(formatter, "{operation} {source:?} -> {destination:?}")
             }
             Self::RemoveFile { path } => write!(formatter, "remove {path:?}"),
             Self::RemoveDirectory { path } => write!(formatter, "rmdir {path:?}"),
@@ -87,7 +104,10 @@ pub struct Options {
     pub merge: bool,
     pub overwrite: bool,
     pub on_error: OnError,
+    /// Copy entries, preserving the entire source tree.
     pub keep: bool,
+    /// Move entries but retain the empty source root.
+    pub keep_empty: bool,
     pub preflight: Preflight,
     pub create: CreateMode,
     pub strict: bool,

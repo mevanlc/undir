@@ -1,6 +1,7 @@
 # undir
 
-`undir` moves every child of one directory into another directory.
+`undir` moves every child of one directory into another directory, or copies
+them with `--keep`.
 
 ```console
 undir [OPTIONS] <SRCDIR> [DSTDIR]
@@ -21,16 +22,33 @@ Hidden entries, symlinks, regular files, and other nondirectory filesystem
 entries are included. Symlinks encountered below either root are moved as links
 and are never followed.
 
-The source directory is removed after all children have been moved. Use `--keep`
-to preserve it. A source directory that remains nonempty is always preserved.
+The source directory is removed after all children have been moved. Two flags
+change this behavior:
+
+- `--keep` copies the children and preserves the entire source tree.
+- `--keep-empty` moves the children and retains only the empty source root
+  (the former behavior of `--keep`). Emptied directories inside it are still
+  removed during merges.
+
+These flags are mutually exclusive. A source directory that remains nonempty
+after moving is always preserved.
 When `SRCDIR` itself is a symlink to a directory, `undir` moves the target's
 children and removes only the command-line symlink; the empty target directory
-remains. A source symlink located inside its own target tree is rejected because
-moving the target's children would also move the command-line source entry.
+remains. `--keep-empty` retains that symlink; `--keep` retains both the symlink
+and its target's contents. In move mode, a source symlink located inside its own
+target tree is rejected because moving the target's children would also move
+the command-line source entry.
 
 `SRCDIR` and `DSTDIR` may themselves be symlinks to directories. Both their
 written paths and resolved targets are checked: the destination must not equal
 the source or be inside it.
+
+Copy mode supports regular files, directories, and symlinks, including dangling
+symlinks, and never follows symlinks below the roots. Other source entry types
+(such as sockets, FIFOs, and devices) fail preflight. Copies retain file and new
+directory permissions; ownership, timestamps, extended metadata, and hard-link
+relationships are not guaranteed to be preserved. Existing merged directory
+permissions are unchanged.
 
 ## collisions
 
@@ -42,10 +60,13 @@ The two opt-in collision behaviors apply recursively:
 - nondirectory onto directory is always an error.
 
 `--overwrite` replaces the destination entry. If the two names are hard links to
-the same object, only the source name is removed.
+the same object, move mode removes only the source name; copy mode replaces the
+destination with an independent copy and retains the source name. Destination
+symlinks are replaced as entries, without writing through them.
 
 Moves across filesystems are not supported. Source mount points that cannot be
-moved or removed are also rejected.
+moved or removed are also rejected in move mode. Copies can cross filesystems
+and read source mount points.
 
 ## destination creation
 
@@ -61,10 +82,12 @@ preflight succeeds.
 
 ## preflight
 
-Preflight models the actual renames, recursive merges, replacements, directory
+Preflight models the actual moves or copies, recursive merges, replacements, directory
 removals, and destination creation before changing the filesystem. It checks
 collision authorization, entry types, mount boundaries, and the process's
 current read, traversal, insertion, replacement, and removal permissions.
+Copy mode checks source readability, including descendants of new directories,
+without requiring source removal permissions.
 
 - `--preflight fast` is the default and stops after the first detected issue.
 - `--preflight full` reports every issue it can discover in deterministic path
@@ -80,9 +103,11 @@ can change afterward, so every filesystem mutation still handles its own errors.
 
 `-n` or `--dry-run` checks the operation and prints the planned actions to standard
 output without changing the filesystem. It includes destination creation, moves,
-overwrites, and removal of emptied source directories or the source symlink.
-`--keep` omits removal of the source root. Directories moved whole appear as one
-move; merged directories list their child operations and cleanup.
+copies, overwrites, and removal of emptied source directories or the source symlink.
+`--keep-empty` omits removal of the source root. `--keep` lists directory creation
+and `copy` or `copy --overwrite` actions, with no source removals. Directories
+moved whole appear as one move; merged directories list their child operations
+and cleanup.
 
 Actions are printed in execution order, with quoted absolute paths, only after
 checks succeed. Failures use the usual standard-error diagnostics and exit status
@@ -106,6 +131,13 @@ must support an atomic no-clobber rename or the operation fails before mutation.
 Authorized replacements under `--overwrite` use the platform's normal
 replacement rename and are outside `--strict`'s scope.
 
+Copied files and symlinks are staged in a temporary directory under the
+destination parent, then renamed into place with the same rules. A failed copy
+does not replace the existing destination. `--strict` applies to these final
+renames too; new directories use exclusive directory creation. Copying a tree
+is not atomic and may leave completed copies or partial directories after an
+error.
+
 The no-clobber implementation is pinned to the maintained
 [Renamore fork](https://github.com/mevanlc/renamore), which currently provides
 native operations for supported Linux filesystems, Apple platforms, and Windows.
@@ -120,7 +152,7 @@ filesystem that is being adversarially modified transactional.
 `--on-error stop` is the default and stops at the first mutation-time error.
 `--on-error continue` continues with independent siblings and reports every
 failure. It does not change preflight behavior, and `undir` never rolls back
-successful earlier moves.
+successful earlier moves or copies.
 
 Operational and preflight failures are written to standard error and exit with
 status 1. Command-line parsing failures use Clap's status 2.
