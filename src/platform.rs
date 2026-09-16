@@ -139,7 +139,10 @@ mod imp {
         check_access(parent, libc::W_OK | libc::X_OK)?;
 
         let parent_metadata = std::fs::metadata(parent)?;
-        if parent_metadata.mode() & u32::from(libc::S_ISVTX) != 0 {
+        // libc::mode_t is u16 on macOS and FreeBSD, but u32 on Linux.
+        #[allow(clippy::useless_conversion)]
+        let sticky_bit = u32::from(libc::S_ISVTX);
+        if parent_metadata.mode() & sticky_bit != 0 {
             let entry_metadata = std::fs::symlink_metadata(path)?;
             let effective_uid = unsafe { libc::geteuid() };
             if effective_uid != 0

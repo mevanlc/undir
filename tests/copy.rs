@@ -1,7 +1,9 @@
 use std::fs;
 use std::path::Path;
 
-use undir::{Action, CreateMode, OnError, Options, Phase, Preflight};
+#[cfg(unix)]
+use undir::Phase;
+use undir::{Action, CreateMode, OnError, Options, Preflight};
 
 fn options(source: &Path, destination: &Path) -> Options {
     Options {
